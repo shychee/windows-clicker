@@ -7,12 +7,17 @@ use std::os::windows::ffi::OsStrExt;
 use std::ptr::{null, null_mut};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
 };
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use windows_clicker::config::{ClickerConfig, MouseButton, SpeedPreset, VirtualKey};
+use windows_clicker::input::{
+    clicker_hotkey_from_keyboard_event, hold_repeat_key_events, is_physical_keyboard_hook_event,
+    is_physical_mouse_hook_event, keyboard_release_events, keyboard_scancode_from_virtual_key,
+    ClickerHotkey, KeyEventKind,
+};
 use windows_clicker::runtime::ClickerRuntime;
 
 type Bool = i32;
@@ -20,6 +25,7 @@ type Dword = u32;
 type Hbrush = isize;
 type Hcursor = isize;
 type HgdiObj = isize;
+type Hhook = isize;
 type Hicon = isize;
 type Hinstance = isize;
 type Hmenu = isize;
@@ -32,10 +38,30 @@ type Uint = u32;
 type UlongPtr = usize;
 type Wparam = usize;
 
+type HookProc = Option<unsafe extern "system" fn(i32, Wparam, Lparam) -> Lresult>;
+
 #[repr(C)]
 struct Point {
     x: i32,
     y: i32,
+}
+
+#[repr(C)]
+struct KbdLlHookStruct {
+    vk_code: Dword,
+    scan_code: Dword,
+    flags: Dword,
+    time: Dword,
+    dw_extra_info: UlongPtr,
+}
+
+#[repr(C)]
+struct MsLlHookStruct {
+    pt: Point,
+    mouse_data: Dword,
+    flags: Dword,
+    time: Dword,
+    dw_extra_info: UlongPtr,
 }
 
 #[repr(C)]
@@ -140,7 +166,6 @@ extern "system" {
     fn DestroyWindow(hwnd: Hwnd) -> Bool;
     fn DispatchMessageW(lp_msg: *const Msg) -> Lresult;
     fn GetDlgItem(hwnd: Hwnd, n_id_dlg_item: i32) -> Hwnd;
-    fn GetAsyncKeyState(v_key: i32) -> i16;
     fn GetMessageW(
         lp_msg: *mut Msg,
         hwnd: Hwnd,
@@ -154,15 +179,22 @@ extern "system" {
     fn MessageBoxW(hwnd: Hwnd, lp_text: Lpcwstr, lp_caption: Lpcwstr, u_type: Uint) -> i32;
     fn PostQuitMessage(n_exit_code: i32);
     fn RegisterClassW(lp_wnd_class: *const WndClassW) -> u16;
-    fn RegisterHotKey(hwnd: Hwnd, id: i32, fs_modifiers: Uint, vk: Uint) -> Bool;
     fn SendInput(c_inputs: Uint, p_inputs: *mut Input, cb_size: i32) -> Uint;
     fn SendMessageW(hwnd: Hwnd, msg: Uint, wparam: Wparam, lparam: Lparam) -> Lresult;
     fn SetMenu(hwnd: Hwnd, h_menu: Hmenu) -> Bool;
+    fn PostMessageW(hwnd: Hwnd, msg: Uint, wparam: Wparam, lparam: Lparam) -> Bool;
+    fn SetWindowsHookExW(
+        id_hook: i32,
+        lpfn: HookProc,
+        hmod: Hinstance,
+        dw_thread_id: Dword,
+    ) -> Hhook;
     fn SetWindowLongPtrW(hwnd: Hwnd, n_index: i32, dw_new_long: isize) -> isize;
     fn SetWindowTextW(hwnd: Hwnd, lp_string: Lpcwstr) -> Bool;
     fn ShowWindow(hwnd: Hwnd, n_cmd_show: i32) -> Bool;
     fn TranslateMessage(lp_msg: *const Msg) -> Bool;
-    fn UnregisterHotKey(hwnd: Hwnd, id: i32) -> Bool;
+    fn CallNextHookEx(hhk: Hhook, n_code: i32, wparam: Wparam, lparam: Lparam) -> Lresult;
+    fn UnhookWindowsHookEx(hhk: Hhook) -> Bool;
 }
 
 #[link(name = "kernel32")]
@@ -212,7 +244,9 @@ const GWLP_USERDATA: i32 = -21;
 const IDC_ARROW: usize = 32512;
 const INPUT_KEYBOARD: Dword = 1;
 const INPUT_MOUSE: Dword = 0;
+const KEYEVENTF_SCANCODE: Dword = 0x0008;
 const KEYEVENTF_KEYUP: Dword = 0x0002;
+const HC_ACTION: i32 = 0;
 const MB_ICONERROR: Uint = 0x00000010;
 const MB_OK: Uint = 0x00000000;
 const MOUSEEVENTF_LEFTDOWN: Dword = 0x0002;
@@ -222,18 +256,24 @@ const MOUSEEVENTF_RIGHTUP: Dword = 0x0010;
 const MOUSEEVENTF_MIDDLEDOWN: Dword = 0x0020;
 const MOUSEEVENTF_MIDDLEUP: Dword = 0x0040;
 const SW_SHOW: i32 = 5;
-const VK_F6: Uint = 0x75;
-const VK_F7: Uint = 0x76;
-const VK_F8: Uint = 0x77;
-const VK_LBUTTON: u16 = 0x01;
-const VK_RBUTTON: u16 = 0x02;
-const VK_MBUTTON: u16 = 0x04;
+const WH_KEYBOARD_LL: i32 = 13;
+const WH_MOUSE_LL: i32 = 14;
 const WM_COMMAND: Uint = 0x0111;
 const WM_CREATE: Uint = 0x0001;
 const WM_DESTROY: Uint = 0x0002;
 const WM_HOTKEY: Uint = 0x0312;
+const WM_KEYDOWN: Uint = 0x0100;
+const WM_KEYUP: Uint = 0x0101;
+const WM_LBUTTONDOWN: Uint = 0x0201;
+const WM_LBUTTONUP: Uint = 0x0202;
+const WM_MBUTTONDOWN: Uint = 0x0207;
+const WM_MBUTTONUP: Uint = 0x0208;
 const WM_NCCREATE: Uint = 0x0081;
+const WM_RBUTTONDOWN: Uint = 0x0204;
+const WM_RBUTTONUP: Uint = 0x0205;
 const WM_SETFONT: Uint = 0x0030;
+const WM_SYSKEYDOWN: Uint = 0x0104;
+const WM_SYSKEYUP: Uint = 0x0105;
 
 const CB_ADDSTRING: Uint = 0x0143;
 const CB_GETCURSEL: Uint = 0x0147;
@@ -252,6 +292,8 @@ const WS_OVERLAPPED: Dword = 0x00000000;
 const WS_SYSMENU: Dword = 0x00080000;
 const WS_TABSTOP: Dword = 0x00010000;
 const WS_VISIBLE: Dword = 0x10000000;
+
+static APP_HWND: OnceLock<Hwnd> = OnceLock::new();
 
 pub fn run() -> Result<(), String> {
     unsafe {
@@ -301,6 +343,7 @@ pub fn run() -> Result<(), String> {
         }
 
         app.hwnd = hwnd;
+        let _ = APP_HWND.set(hwnd);
         Box::leak(app);
 
         ShowWindow(hwnd, SW_SHOW);
@@ -326,10 +369,79 @@ pub fn show_error(title: &str, message: &str) {
     }
 }
 
+static INPUT_STATE: OnceLock<Arc<PhysicalInputState>> = OnceLock::new();
+
+#[derive(Debug)]
+struct PhysicalInputState {
+    keys: Mutex<[bool; 256]>,
+    mouse: Mutex<PhysicalMouseButtons>,
+}
+
+#[derive(Debug, Default)]
+struct PhysicalMouseButtons {
+    left: bool,
+    right: bool,
+    middle: bool,
+}
+
+impl PhysicalInputState {
+    fn new() -> Self {
+        Self {
+            keys: Mutex::new([false; 256]),
+            mouse: Mutex::new(PhysicalMouseButtons::default()),
+        }
+    }
+
+    fn clear(&self) {
+        *self.keys.lock().unwrap() = [false; 256];
+        *self.mouse.lock().unwrap() = PhysicalMouseButtons::default();
+    }
+
+    fn set_key(&self, vk_code: Dword, down: bool) -> bool {
+        if let Some(key) = self.keys.lock().unwrap().get_mut(vk_code as usize) {
+            let was_down = *key;
+            *key = down;
+            was_down
+        } else {
+            false
+        }
+    }
+
+    fn is_key_down(&self, key: VirtualKey) -> bool {
+        self.keys
+            .lock()
+            .unwrap()
+            .get(key.0 as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    fn set_mouse_button(&self, button: MouseButton, down: bool) {
+        let mut mouse = self.mouse.lock().unwrap();
+        match button {
+            MouseButton::Left => mouse.left = down,
+            MouseButton::Right => mouse.right = down,
+            MouseButton::Middle => mouse.middle = down,
+        }
+    }
+
+    fn is_mouse_button_down(&self, button: MouseButton) -> bool {
+        let mouse = self.mouse.lock().unwrap();
+        match button {
+            MouseButton::Left => mouse.left,
+            MouseButton::Right => mouse.right,
+            MouseButton::Middle => mouse.middle,
+        }
+    }
+}
+
 struct AppState {
     hwnd: Hwnd,
     language: Language,
     runtime: Arc<Mutex<ClickerRuntime>>,
+    input_state: Arc<PhysicalInputState>,
+    keyboard_hook: Hhook,
+    mouse_hook: Hhook,
     mouse_stop: Option<Arc<AtomicBool>>,
     keyboard_stop: Option<Arc<AtomicBool>>,
     mouse_thread: Option<JoinHandle<()>>,
@@ -339,11 +451,17 @@ struct AppState {
 impl AppState {
     fn new() -> Result<Self, String> {
         let config = ClickerConfig::new(MouseButton::Left, 100, "Space", 100)?;
+        let input_state =
+            Arc::clone(INPUT_STATE.get_or_init(|| Arc::new(PhysicalInputState::new())));
+        input_state.clear();
 
         Ok(Self {
             hwnd: 0,
             language: Language::English,
             runtime: Arc::new(Mutex::new(ClickerRuntime::new(config))),
+            input_state,
+            keyboard_hook: 0,
+            mouse_hook: 0,
             mouse_stop: None,
             keyboard_stop: None,
             mouse_thread: None,
@@ -355,20 +473,50 @@ impl AppState {
         self.hwnd = hwnd;
         create_menu(hwnd);
         create_controls(hwnd);
-        self.register_hotkeys();
+        if let Err(err) = self.install_hooks() {
+            show_error(APP_TITLE, &err);
+            DestroyWindow(hwnd);
+            return;
+        }
         self.refresh_status();
     }
 
-    unsafe fn register_hotkeys(&self) {
-        RegisterHotKey(self.hwnd, HOTKEY_MOUSE, 0, VK_F6);
-        RegisterHotKey(self.hwnd, HOTKEY_KEYBOARD, 0, VK_F7);
-        RegisterHotKey(self.hwnd, HOTKEY_STOP, 0, VK_F8);
+    unsafe fn install_hooks(&mut self) -> Result<(), String> {
+        let instance = GetModuleHandleW(null()) as Hinstance;
+        if instance == 0 {
+            return Err(format!("GetModuleHandleW failed: {}", GetLastError()));
+        }
+
+        let keyboard_hook =
+            SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), instance, 0);
+        if keyboard_hook == 0 {
+            return Err(format!(
+                "SetWindowsHookExW keyboard hook failed: {}",
+                GetLastError()
+            ));
+        }
+
+        let mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), instance, 0);
+        if mouse_hook == 0 {
+            let error = GetLastError();
+            UnhookWindowsHookEx(keyboard_hook);
+            return Err(format!("SetWindowsHookExW mouse hook failed: {error}"));
+        }
+
+        self.keyboard_hook = keyboard_hook;
+        self.mouse_hook = mouse_hook;
+        Ok(())
     }
 
-    unsafe fn unregister_hotkeys(&self) {
-        UnregisterHotKey(self.hwnd, HOTKEY_MOUSE);
-        UnregisterHotKey(self.hwnd, HOTKEY_KEYBOARD);
-        UnregisterHotKey(self.hwnd, HOTKEY_STOP);
+    unsafe fn uninstall_hooks(&mut self) {
+        if self.keyboard_hook != 0 {
+            UnhookWindowsHookEx(self.keyboard_hook);
+            self.keyboard_hook = 0;
+        }
+        if self.mouse_hook != 0 {
+            UnhookWindowsHookEx(self.mouse_hook);
+            self.mouse_hook = 0;
+        }
     }
 
     unsafe fn handle_command(&mut self, command_id: i32, notification_code: u16) {
@@ -424,11 +572,12 @@ impl AppState {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_for_thread = Arc::clone(&stop);
         let runtime = Arc::clone(&self.runtime);
+        let input_state = Arc::clone(&self.input_state);
 
         self.mouse_thread = Some(thread::spawn(move || {
             while !stop_for_thread.load(Ordering::Relaxed) {
                 let snapshot = runtime.lock().unwrap().snapshot();
-                if is_mouse_button_physically_down(snapshot.config.mouse_button) {
+                if input_state.is_mouse_button_down(snapshot.config.mouse_button) {
                     click_mouse(snapshot.config.mouse_button);
                     thread::sleep(Duration::from_millis(snapshot.config.mouse_interval_ms));
                 } else {
@@ -444,16 +593,30 @@ impl AppState {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_for_thread = Arc::clone(&stop);
         let runtime = Arc::clone(&self.runtime);
+        let input_state = Arc::clone(&self.input_state);
 
         self.keyboard_thread = Some(thread::spawn(move || {
+            let mut synthetic_key_down: Option<VirtualKey> = None;
             while !stop_for_thread.load(Ordering::Relaxed) {
                 let snapshot = runtime.lock().unwrap().snapshot();
-                if is_key_physically_down(snapshot.config.keyboard_key) {
-                    press_key(snapshot.config.keyboard_key);
+                if input_state.is_key_down(snapshot.config.keyboard_key) {
+                    if synthetic_key_down != Some(snapshot.config.keyboard_key) {
+                        if let Some(previous_key) = synthetic_key_down {
+                            release_repeated_key(previous_key);
+                        }
+                    }
+                    repeat_held_key(snapshot.config.keyboard_key);
+                    synthetic_key_down = Some(snapshot.config.keyboard_key);
                     thread::sleep(Duration::from_millis(snapshot.config.keyboard_interval_ms));
                 } else {
+                    if let Some(previous_key) = synthetic_key_down.take() {
+                        release_repeated_key(previous_key);
+                    }
                     thread::sleep(Duration::from_millis(10));
                 }
+            }
+            if let Some(previous_key) = synthetic_key_down {
+                release_repeated_key(previous_key);
             }
         }));
         self.keyboard_stop = Some(stop);
@@ -585,7 +748,75 @@ impl Drop for AppState {
     fn drop(&mut self) {
         self.stop_mouse_worker();
         self.stop_keyboard_worker();
+        unsafe {
+            self.uninstall_hooks();
+        }
     }
+}
+
+unsafe extern "system" fn keyboard_hook_proc(
+    n_code: i32,
+    wparam: Wparam,
+    lparam: Lparam,
+) -> Lresult {
+    if n_code == HC_ACTION && lparam != 0 {
+        let event = &*(lparam as *const KbdLlHookStruct);
+        if is_physical_keyboard_hook_event(event.flags) {
+            if let Some(input_state) = INPUT_STATE.get() {
+                match wparam as Uint {
+                    WM_KEYDOWN | WM_SYSKEYDOWN => {
+                        let was_down = input_state.set_key(event.vk_code, true);
+                        if let Some(hotkey) =
+                            clicker_hotkey_from_keyboard_event(event.vk_code, true, was_down)
+                        {
+                            post_clicker_hotkey(hotkey);
+                        }
+                    }
+                    WM_KEYUP | WM_SYSKEYUP => {
+                        input_state.set_key(event.vk_code, false);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    CallNextHookEx(0, n_code, wparam, lparam)
+}
+
+unsafe fn post_clicker_hotkey(hotkey: ClickerHotkey) {
+    let Some(hwnd) = APP_HWND.get().copied() else {
+        return;
+    };
+
+    let id = match hotkey {
+        ClickerHotkey::Mouse => HOTKEY_MOUSE,
+        ClickerHotkey::Keyboard => HOTKEY_KEYBOARD,
+        ClickerHotkey::StopAll => HOTKEY_STOP,
+    };
+
+    PostMessageW(hwnd, WM_HOTKEY, id as Wparam, 0);
+}
+
+unsafe extern "system" fn mouse_hook_proc(n_code: i32, wparam: Wparam, lparam: Lparam) -> Lresult {
+    if n_code == HC_ACTION && lparam != 0 {
+        let event = &*(lparam as *const MsLlHookStruct);
+        if is_physical_mouse_hook_event(event.flags) {
+            if let Some(input_state) = INPUT_STATE.get() {
+                match wparam as Uint {
+                    WM_LBUTTONDOWN => input_state.set_mouse_button(MouseButton::Left, true),
+                    WM_LBUTTONUP => input_state.set_mouse_button(MouseButton::Left, false),
+                    WM_RBUTTONDOWN => input_state.set_mouse_button(MouseButton::Right, true),
+                    WM_RBUTTONUP => input_state.set_mouse_button(MouseButton::Right, false),
+                    WM_MBUTTONDOWN => input_state.set_mouse_button(MouseButton::Middle, true),
+                    WM_MBUTTONUP => input_state.set_mouse_button(MouseButton::Middle, false),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    CallNextHookEx(0, n_code, wparam, lparam)
 }
 
 unsafe extern "system" fn window_proc(
@@ -629,7 +860,6 @@ unsafe extern "system" fn window_proc(
         }
         WM_DESTROY => {
             if !app.is_null() {
-                (*app).unregister_hotkeys();
                 (*app).stop_all();
                 drop(Box::from_raw(app));
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -884,7 +1114,7 @@ unsafe fn read_interval_from_controls(
     }
 
     let selected = SendMessageW(GetDlgItem(hwnd, speed_id), CB_GETCURSEL, 0, 0);
-    let index = if selected < 0 { 3 } else { selected as usize };
+    let index = if selected < 0 { 4 } else { selected as usize };
     let preset = SpeedPreset::ALL
         .get(index)
         .copied()
@@ -918,7 +1148,7 @@ unsafe fn refill_speed_combo(hwnd: Hwnd, id: i32, language: Language) {
         };
         SendMessageW(combo, CB_ADDSTRING, 0, wide(label).as_ptr() as Lparam);
     }
-    let next_selected = if selected < 0 { 3 } else { selected as Wparam };
+    let next_selected = if selected < 0 { 4 } else { selected as Wparam };
     SendMessageW(combo, CB_SETCURSEL, next_selected, 0);
 }
 
@@ -935,25 +1165,32 @@ fn click_mouse(button: MouseButton) {
     }
 }
 
-fn press_key(key: VirtualKey) {
-    unsafe {
-        send_key_event(key, 0);
-        send_key_event(key, KEYEVENTF_KEYUP);
+fn repeat_held_key(key: VirtualKey) {
+    for event in hold_repeat_key_events() {
+        send_key_event_kind(key, event);
     }
 }
 
-fn is_key_physically_down(key: VirtualKey) -> bool {
-    unsafe { (GetAsyncKeyState(key.0 as i32) & 0x8000u16 as i16) != 0 }
+fn release_repeated_key(key: VirtualKey) {
+    for event in keyboard_release_events() {
+        send_key_event_kind(key, event);
+    }
 }
 
-fn is_mouse_button_physically_down(button: MouseButton) -> bool {
-    let key = match button {
-        MouseButton::Left => VK_LBUTTON,
-        MouseButton::Right => VK_RBUTTON,
-        MouseButton::Middle => VK_MBUTTON,
+fn send_key_event_kind(key: VirtualKey, event: KeyEventKind) {
+    let mut flags = match event {
+        KeyEventKind::Down => 0,
+        KeyEventKind::Up => KEYEVENTF_KEYUP,
     };
 
-    is_key_physically_down(VirtualKey(key))
+    unsafe {
+        if let Some(scancode) = keyboard_scancode_from_virtual_key(key) {
+            flags |= KEYEVENTF_SCANCODE;
+            send_scancode_key_event(scancode, flags);
+        } else {
+            send_virtual_key_event(key, flags);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1086,7 +1323,24 @@ unsafe fn send_mouse_event(flags: Dword) {
     SendInput(1, &mut input, size_of::<Input>() as i32);
 }
 
-unsafe fn send_key_event(key: VirtualKey, flags: Dword) {
+unsafe fn send_scancode_key_event(scancode: u16, flags: Dword) {
+    let mut input = Input {
+        input_type: INPUT_KEYBOARD,
+        input: InputUnion {
+            ki: KeybdInput {
+                w_vk: 0,
+                w_scan: scancode,
+                dw_flags: flags,
+                time: 0,
+                dw_extra_info: 0,
+            },
+        },
+    };
+
+    SendInput(1, &mut input, size_of::<Input>() as i32);
+}
+
+unsafe fn send_virtual_key_event(key: VirtualKey, flags: Dword) {
     let mut input = Input {
         input_type: INPUT_KEYBOARD,
         input: InputUnion {

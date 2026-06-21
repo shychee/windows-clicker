@@ -13,12 +13,13 @@ uploaded as a release asset.
 - Windows GUI executable with English and Chinese UI text.
 - Mouse hold-to-repeat for left, right, and middle buttons.
 - Keyboard hold-to-repeat for one configured key.
-- Global hotkeys for mouse arm, keyboard arm, and emergency stop.
-- User-friendly speed presets such as `10 / sec`, plus custom interval ms.
+- Low-level `F6`, `F7`, and `F8` hotkeys for mouse arm, keyboard arm, and
+  emergency stop.
+- User-friendly speed presets such as `20 / sec`, plus custom interval ms.
 
-This tool uses normal Windows input injection APIs. It does not bypass game
-anti-cheat systems, elevated-window isolation, or applications that reject
-synthetic input.
+This tool uses normal Windows low-level input hooks and input injection APIs. It
+does not bypass game anti-cheat systems, elevated-window isolation, or
+applications that reject synthetic input.
 
 ## Development
 
@@ -44,12 +45,12 @@ The executable will be copied to `dist\windows-clicker.exe`.
 
 - Language: choose `English` or `中文`.
 - Mouse button: choose `Left`, `Right`, or `Middle`.
-- Mouse speed: choose a preset such as `1 / sec`, `5 / sec`, or `10 / sec`.
+- Mouse speed: choose a preset such as `1 / sec`, `10 / sec`, or `20 / sec`.
 - Mouse custom interval ms: optional advanced override. Leave it blank to use
   the speed preset. Minimum: `25`.
 - Keyboard key: examples include `Space`, `Enter`, `Esc`, `A`, `7`, `J`, `F1`,
   `F12`, `Left`, `Right`, `Up`, and `Down`.
-- Keyboard speed: choose a preset such as `1 / sec`, `5 / sec`, or `10 / sec`.
+- Keyboard speed: choose a preset such as `1 / sec`, `10 / sec`, or `20 / sec`.
 - Keyboard custom interval ms: optional advanced override. Leave it blank to use
   the speed preset. Minimum: `25`.
 - `F6`: arm or disarm mouse hold-to-repeat.
@@ -63,6 +64,12 @@ keeping mouse mode armed.
 When keyboard hold-to-repeat is armed, holding the configured key repeats that
 key at the configured speed. Releasing the key stops the repeat while keeping
 keyboard mode armed.
+
+For same-key repeat, such as holding `J` to emit repeated `J`, the app tracks
+the physical key with a low-level keyboard hook and ignores its own injected
+events. Repeats are sent as scancode input when possible. Each repeat refreshes
+the key with `Up` then `Down`, leaving the synthetic key down until the physical
+key is released or keyboard mode is stopped, when a final `Up` is sent.
 
 The window must stay open while the clickers are running.
 

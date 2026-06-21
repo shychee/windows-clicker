@@ -26,15 +26,17 @@ pub enum SpeedPreset {
     FivePerSecond,
     TenPerSecond,
     TwentyPerSecond,
+    ThirtyPerSecond,
 }
 
 impl SpeedPreset {
-    pub const ALL: [SpeedPreset; 5] = [
+    pub const ALL: [SpeedPreset; 6] = [
         SpeedPreset::OnePerSecond,
         SpeedPreset::TwoPerSecond,
         SpeedPreset::FivePerSecond,
         SpeedPreset::TenPerSecond,
         SpeedPreset::TwentyPerSecond,
+        SpeedPreset::ThirtyPerSecond,
     ];
 
     pub fn clicks_per_second(self) -> u64 {
@@ -44,6 +46,7 @@ impl SpeedPreset {
             SpeedPreset::FivePerSecond => 5,
             SpeedPreset::TenPerSecond => 10,
             SpeedPreset::TwentyPerSecond => 20,
+            SpeedPreset::ThirtyPerSecond => 30,
         }
     }
 
@@ -59,6 +62,7 @@ impl SpeedPreset {
             SpeedPreset::FivePerSecond => "5 / sec",
             SpeedPreset::TenPerSecond => "10 / sec",
             SpeedPreset::TwentyPerSecond => "20 / sec",
+            SpeedPreset::ThirtyPerSecond => "30 / sec",
         }
     }
 
@@ -69,6 +73,7 @@ impl SpeedPreset {
             SpeedPreset::FivePerSecond => "每秒 5 次",
             SpeedPreset::TenPerSecond => "每秒 10 次",
             SpeedPreset::TwentyPerSecond => "每秒 20 次",
+            SpeedPreset::ThirtyPerSecond => "每秒 30 次",
         }
     }
 }
