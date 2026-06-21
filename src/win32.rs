@@ -12,7 +12,7 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use windows_clicker::config::{ClickerConfig, MouseButton, VirtualKey, MIN_INTERVAL_MS};
+use windows_clicker::config::{ClickerConfig, MouseButton, SpeedPreset, VirtualKey};
 use windows_clicker::runtime::ClickerRuntime;
 
 type Bool = i32;
@@ -115,7 +115,12 @@ struct Input {
 
 #[link(name = "user32")]
 extern "system" {
-    fn AppendMenuW(h_menu: Hmenu, u_flags: Uint, u_id_new_item: usize, lp_new_item: Lpcwstr) -> Bool;
+    fn AppendMenuW(
+        h_menu: Hmenu,
+        u_flags: Uint,
+        u_id_new_item: usize,
+        lp_new_item: Lpcwstr,
+    ) -> Bool;
     fn CreateMenu() -> Hmenu;
     fn CreateWindowExW(
         dw_ex_style: Dword,
@@ -135,7 +140,13 @@ extern "system" {
     fn DestroyWindow(hwnd: Hwnd) -> Bool;
     fn DispatchMessageW(lp_msg: *const Msg) -> Lresult;
     fn GetDlgItem(hwnd: Hwnd, n_id_dlg_item: i32) -> Hwnd;
-    fn GetMessageW(lp_msg: *mut Msg, hwnd: Hwnd, msg_filter_min: Uint, msg_filter_max: Uint) -> Bool;
+    fn GetAsyncKeyState(v_key: i32) -> i16;
+    fn GetMessageW(
+        lp_msg: *mut Msg,
+        hwnd: Hwnd,
+        msg_filter_min: Uint,
+        msg_filter_max: Uint,
+    ) -> Bool;
     fn GetWindowLongPtrW(hwnd: Hwnd, n_index: i32) -> isize;
     fn GetWindowTextLengthW(hwnd: Hwnd) -> i32;
     fn GetWindowTextW(hwnd: Hwnd, lp_string: *mut u16, n_max_count: i32) -> i32;
@@ -176,7 +187,16 @@ const ID_MOUSE_TOGGLE: i32 = 1005;
 const ID_KEY_TOGGLE: i32 = 1006;
 const ID_STOP_ALL: i32 = 1007;
 const ID_STATUS: i32 = 1008;
-const IDC_STATIC_ID: i32 = -1;
+const ID_LANGUAGE_LABEL: i32 = 1009;
+const ID_LANGUAGE: i32 = 1010;
+const ID_MOUSE_BUTTON_LABEL: i32 = 1011;
+const ID_MOUSE_SPEED_LABEL: i32 = 1012;
+const ID_MOUSE_SPEED: i32 = 1013;
+const ID_MOUSE_CUSTOM_LABEL: i32 = 1014;
+const ID_KEY_INPUT_LABEL: i32 = 1015;
+const ID_KEY_SPEED_LABEL: i32 = 1016;
+const ID_KEY_SPEED: i32 = 1017;
+const ID_KEY_CUSTOM_LABEL: i32 = 1018;
 
 const HOTKEY_MOUSE: i32 = 2001;
 const HOTKEY_KEYBOARD: i32 = 2002;
@@ -205,6 +225,9 @@ const SW_SHOW: i32 = 5;
 const VK_F6: Uint = 0x75;
 const VK_F7: Uint = 0x76;
 const VK_F8: Uint = 0x77;
+const VK_LBUTTON: u16 = 0x01;
+const VK_RBUTTON: u16 = 0x02;
+const VK_MBUTTON: u16 = 0x04;
 const WM_COMMAND: Uint = 0x0111;
 const WM_CREATE: Uint = 0x0001;
 const WM_DESTROY: Uint = 0x0002;
@@ -214,7 +237,9 @@ const WM_SETFONT: Uint = 0x0030;
 
 const CB_ADDSTRING: Uint = 0x0143;
 const CB_GETCURSEL: Uint = 0x0147;
+const CB_RESETCONTENT: Uint = 0x014B;
 const CB_SETCURSEL: Uint = 0x014E;
+const CBN_SELCHANGE: u16 = 1;
 
 const CBS_DROPDOWNLIST: Dword = 0x0003;
 const ES_AUTOHSCROLL: Dword = 0x0080;
@@ -263,8 +288,8 @@ pub fn run() -> Result<(), String> {
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            430,
-            330,
+            540,
+            390,
             0,
             0,
             instance,
@@ -303,6 +328,7 @@ pub fn show_error(title: &str, message: &str) {
 
 struct AppState {
     hwnd: Hwnd,
+    language: Language,
     runtime: Arc<Mutex<ClickerRuntime>>,
     mouse_stop: Option<Arc<AtomicBool>>,
     keyboard_stop: Option<Arc<AtomicBool>>,
@@ -316,6 +342,7 @@ impl AppState {
 
         Ok(Self {
             hwnd: 0,
+            language: Language::English,
             runtime: Arc::new(Mutex::new(ClickerRuntime::new(config))),
             mouse_stop: None,
             keyboard_stop: None,
@@ -344,11 +371,15 @@ impl AppState {
         UnregisterHotKey(self.hwnd, HOTKEY_STOP);
     }
 
-    unsafe fn handle_command(&mut self, command_id: i32) {
+    unsafe fn handle_command(&mut self, command_id: i32, notification_code: u16) {
         match command_id {
             ID_MOUSE_TOGGLE => self.toggle_mouse_from_ui(),
             ID_KEY_TOGGLE => self.toggle_keyboard_from_ui(),
             ID_STOP_ALL => self.stop_all(),
+            ID_LANGUAGE if notification_code == CBN_SELCHANGE => {
+                self.language = self.read_language();
+                self.apply_language();
+            }
             id if id as usize == MENU_EXIT => {
                 DestroyWindow(self.hwnd);
             }
@@ -360,8 +391,8 @@ impl AppState {
         match self.read_config() {
             Ok(config) => {
                 self.runtime.lock().unwrap().set_config(config);
-                let running = self.runtime.lock().unwrap().toggle_mouse();
-                if running {
+                let armed = self.runtime.lock().unwrap().toggle_mouse();
+                if armed {
                     self.start_mouse_worker();
                 } else {
                     self.stop_mouse_worker();
@@ -376,8 +407,8 @@ impl AppState {
         match self.read_config() {
             Ok(config) => {
                 self.runtime.lock().unwrap().set_config(config);
-                let running = self.runtime.lock().unwrap().toggle_keyboard();
-                if running {
+                let armed = self.runtime.lock().unwrap().toggle_keyboard();
+                if armed {
                     self.start_keyboard_worker();
                 } else {
                     self.stop_keyboard_worker();
@@ -397,8 +428,12 @@ impl AppState {
         self.mouse_thread = Some(thread::spawn(move || {
             while !stop_for_thread.load(Ordering::Relaxed) {
                 let snapshot = runtime.lock().unwrap().snapshot();
-                click_mouse(snapshot.config.mouse_button);
-                thread::sleep(Duration::from_millis(snapshot.config.mouse_interval_ms));
+                if is_mouse_button_physically_down(snapshot.config.mouse_button) {
+                    click_mouse(snapshot.config.mouse_button);
+                    thread::sleep(Duration::from_millis(snapshot.config.mouse_interval_ms));
+                } else {
+                    thread::sleep(Duration::from_millis(10));
+                }
             }
         }));
         self.mouse_stop = Some(stop);
@@ -413,8 +448,12 @@ impl AppState {
         self.keyboard_thread = Some(thread::spawn(move || {
             while !stop_for_thread.load(Ordering::Relaxed) {
                 let snapshot = runtime.lock().unwrap().snapshot();
-                press_key(snapshot.config.keyboard_key);
-                thread::sleep(Duration::from_millis(snapshot.config.keyboard_interval_ms));
+                if is_key_physically_down(snapshot.config.keyboard_key) {
+                    press_key(snapshot.config.keyboard_key);
+                    thread::sleep(Duration::from_millis(snapshot.config.keyboard_interval_ms));
+                } else {
+                    thread::sleep(Duration::from_millis(10));
+                }
             }
         }));
         self.keyboard_stop = Some(stop);
@@ -447,48 +486,98 @@ impl AppState {
 
     unsafe fn refresh_status(&self) {
         let snapshot = self.runtime.lock().unwrap().snapshot();
-        let mouse = if snapshot.mouse_running { "ON" } else { "OFF" };
-        let keyboard = if snapshot.keyboard_running { "ON" } else { "OFF" };
-        let text = format!(
-            "Mouse: {mouse} (F6)    Keyboard: {keyboard} (F7)    Stop all: F8"
-        );
+        let mouse = self.language.armed_label(snapshot.mouse_armed);
+        let keyboard = self.language.armed_label(snapshot.keyboard_armed);
+        let text = self.language.status_text(mouse, keyboard);
         SetWindowTextW(GetDlgItem(self.hwnd, ID_STATUS), wide(&text).as_ptr());
         SetWindowTextW(
             GetDlgItem(self.hwnd, ID_MOUSE_TOGGLE),
-            wide(if snapshot.mouse_running {
-                "Stop Mouse (F6)"
+            wide(if snapshot.mouse_armed {
+                self.language.disarm_mouse()
             } else {
-                "Start Mouse (F6)"
+                self.language.arm_mouse()
             })
             .as_ptr(),
         );
         SetWindowTextW(
             GetDlgItem(self.hwnd, ID_KEY_TOGGLE),
-            wide(if snapshot.keyboard_running {
-                "Stop Keyboard (F7)"
+            wide(if snapshot.keyboard_armed {
+                self.language.disarm_keyboard()
             } else {
-                "Start Keyboard (F7)"
+                self.language.arm_keyboard()
             })
             .as_ptr(),
         );
     }
 
+    unsafe fn apply_language(&self) {
+        set_text(self.hwnd, ID_LANGUAGE_LABEL, self.language.language_label());
+        set_text(
+            self.hwnd,
+            ID_MOUSE_BUTTON_LABEL,
+            self.language.mouse_button_label(),
+        );
+        set_text(
+            self.hwnd,
+            ID_MOUSE_SPEED_LABEL,
+            self.language.mouse_speed_label(),
+        );
+        set_text(
+            self.hwnd,
+            ID_MOUSE_CUSTOM_LABEL,
+            self.language.custom_ms_label(),
+        );
+        set_text(
+            self.hwnd,
+            ID_KEY_INPUT_LABEL,
+            self.language.keyboard_key_label(),
+        );
+        set_text(
+            self.hwnd,
+            ID_KEY_SPEED_LABEL,
+            self.language.keyboard_speed_label(),
+        );
+        set_text(
+            self.hwnd,
+            ID_KEY_CUSTOM_LABEL,
+            self.language.custom_ms_label(),
+        );
+        set_text(self.hwnd, ID_STOP_ALL, self.language.stop_all());
+        refill_mouse_button_combo(self.hwnd, self.language);
+        refill_speed_combo(self.hwnd, ID_MOUSE_SPEED, self.language);
+        refill_speed_combo(self.hwnd, ID_KEY_SPEED, self.language);
+        self.refresh_status();
+    }
+
     unsafe fn read_config(&self) -> Result<ClickerConfig, String> {
-        let mouse_button = match SendMessageW(
-            GetDlgItem(self.hwnd, ID_MOUSE_BUTTON),
-            CB_GETCURSEL,
-            0,
-            0,
-        ) {
-            1 => MouseButton::Right,
-            2 => MouseButton::Middle,
-            _ => MouseButton::Left,
-        };
-        let mouse_interval_ms = read_u64(self.hwnd, ID_MOUSE_INTERVAL, "mouse interval")?;
+        let mouse_button =
+            match SendMessageW(GetDlgItem(self.hwnd, ID_MOUSE_BUTTON), CB_GETCURSEL, 0, 0) {
+                1 => MouseButton::Right,
+                2 => MouseButton::Middle,
+                _ => MouseButton::Left,
+            };
+        let mouse_interval_ms = read_interval_from_controls(
+            self.hwnd,
+            ID_MOUSE_SPEED,
+            ID_MOUSE_INTERVAL,
+            "mouse interval",
+        )?;
         let key = read_text(self.hwnd, ID_KEY_INPUT);
-        let keyboard_interval_ms = read_u64(self.hwnd, ID_KEY_INTERVAL, "keyboard interval")?;
+        let keyboard_interval_ms = read_interval_from_controls(
+            self.hwnd,
+            ID_KEY_SPEED,
+            ID_KEY_INTERVAL,
+            "keyboard interval",
+        )?;
 
         ClickerConfig::new(mouse_button, mouse_interval_ms, &key, keyboard_interval_ms)
+    }
+
+    unsafe fn read_language(&self) -> Language {
+        match SendMessageW(GetDlgItem(self.hwnd, ID_LANGUAGE), CB_GETCURSEL, 0, 0) {
+            1 => Language::Chinese,
+            _ => Language::English,
+        }
     }
 }
 
@@ -523,7 +612,7 @@ unsafe extern "system" fn window_proc(
         }
         WM_COMMAND => {
             if !app.is_null() {
-                (*app).handle_command((wparam & 0xffff) as i32);
+                (*app).handle_command((wparam & 0xffff) as i32, ((wparam >> 16) & 0xffff) as u16);
             }
             0
         }
@@ -561,44 +650,111 @@ unsafe fn create_menu(hwnd: Hwnd) {
 unsafe fn create_controls(hwnd: Hwnd) {
     let font = GetStockObject(DEFAULT_GUI_FONT);
 
-    static_label(hwnd, "Mouse button", 20, 20, 110, 24);
+    label_with_id(hwnd, ID_LANGUAGE_LABEL, "Language", 20, 20, 130, 24);
+    let language_combo = control(
+        hwnd,
+        "COMBOBOX",
+        "",
+        WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_BORDER | CBS_DROPDOWNLIST,
+        ID_LANGUAGE,
+        160,
+        18,
+        160,
+        90,
+    );
+    for item in ["English", "中文"] {
+        SendMessageW(
+            language_combo,
+            CB_ADDSTRING,
+            0,
+            wide(item).as_ptr() as Lparam,
+        );
+    }
+    SendMessageW(language_combo, CB_SETCURSEL, 0, 0);
+
+    label_with_id(hwnd, ID_MOUSE_BUTTON_LABEL, "Mouse button", 20, 58, 130, 24);
     let combo = control(
         hwnd,
         "COMBOBOX",
         "",
         WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_BORDER | CBS_DROPDOWNLIST,
         ID_MOUSE_BUTTON,
-        140,
-        18,
+        160,
+        56,
         180,
         120,
     );
-    for item in ["Left", "Right", "Middle"] {
-        SendMessageW(combo, CB_ADDSTRING, 0, wide(item).as_ptr() as Lparam);
-    }
     SendMessageW(combo, CB_SETCURSEL, 0, 0);
 
-    static_label(hwnd, "Mouse interval ms", 20, 58, 130, 24);
-    textbox(hwnd, ID_MOUSE_INTERVAL, "100", 160, 56, 90, 24);
-    static_label(hwnd, &format!("min {MIN_INTERVAL_MS}"), 260, 58, 70, 24);
+    label_with_id(hwnd, ID_MOUSE_SPEED_LABEL, "Mouse speed", 20, 96, 130, 24);
+    control(
+        hwnd,
+        "COMBOBOX",
+        "",
+        WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_BORDER | CBS_DROPDOWNLIST,
+        ID_MOUSE_SPEED,
+        160,
+        94,
+        130,
+        150,
+    );
+    label_with_id(
+        hwnd,
+        ID_MOUSE_CUSTOM_LABEL,
+        "Custom interval ms",
+        305,
+        96,
+        130,
+        24,
+    );
+    textbox(hwnd, ID_MOUSE_INTERVAL, "", 440, 94, 70, 24);
 
-    static_label(hwnd, "Keyboard key", 20, 96, 110, 24);
-    textbox(hwnd, ID_KEY_INPUT, "Space", 160, 94, 90, 24);
+    label_with_id(hwnd, ID_KEY_INPUT_LABEL, "Keyboard key", 20, 134, 130, 24);
+    textbox(hwnd, ID_KEY_INPUT, "Space", 160, 132, 90, 24);
 
-    static_label(hwnd, "Keyboard interval ms", 20, 134, 140, 24);
-    textbox(hwnd, ID_KEY_INTERVAL, "100", 160, 132, 90, 24);
-    static_label(hwnd, &format!("min {MIN_INTERVAL_MS}"), 260, 134, 70, 24);
+    label_with_id(hwnd, ID_KEY_SPEED_LABEL, "Keyboard speed", 20, 172, 130, 24);
+    control(
+        hwnd,
+        "COMBOBOX",
+        "",
+        WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_BORDER | CBS_DROPDOWNLIST,
+        ID_KEY_SPEED,
+        160,
+        170,
+        130,
+        150,
+    );
+    label_with_id(
+        hwnd,
+        ID_KEY_CUSTOM_LABEL,
+        "Custom interval ms",
+        305,
+        172,
+        130,
+        24,
+    );
+    textbox(hwnd, ID_KEY_INTERVAL, "", 440, 170, 70, 24);
 
-    button(hwnd, ID_MOUSE_TOGGLE, "Start Mouse (F6)", 20, 180, 170, 34);
-    button(hwnd, ID_KEY_TOGGLE, "Start Keyboard (F7)", 205, 180, 180, 34);
-    button(hwnd, ID_STOP_ALL, "Stop All (F8)", 20, 222, 365, 34);
+    button(hwnd, ID_MOUSE_TOGGLE, "Arm Mouse (F6)", 20, 222, 220, 34);
+    button(hwnd, ID_KEY_TOGGLE, "Arm Keyboard (F7)", 260, 222, 220, 34);
+    button(hwnd, ID_STOP_ALL, "Stop All (F8)", 20, 264, 460, 34);
 
-    label_with_id(hwnd, ID_STATUS, "", 20, 270, 365, 24);
+    label_with_id(hwnd, ID_STATUS, "", 20, 320, 480, 24);
 
     for id in [
+        ID_LANGUAGE_LABEL,
+        ID_LANGUAGE,
+        ID_MOUSE_BUTTON_LABEL,
         ID_MOUSE_BUTTON,
+        ID_MOUSE_SPEED_LABEL,
+        ID_MOUSE_SPEED,
+        ID_MOUSE_CUSTOM_LABEL,
         ID_MOUSE_INTERVAL,
+        ID_KEY_INPUT_LABEL,
         ID_KEY_INPUT,
+        ID_KEY_SPEED_LABEL,
+        ID_KEY_SPEED,
+        ID_KEY_CUSTOM_LABEL,
         ID_KEY_INTERVAL,
         ID_MOUSE_TOGGLE,
         ID_KEY_TOGGLE,
@@ -607,10 +763,9 @@ unsafe fn create_controls(hwnd: Hwnd) {
     ] {
         SendMessageW(GetDlgItem(hwnd, id), WM_SETFONT, font as Wparam, 1);
     }
-}
-
-unsafe fn static_label(hwnd: Hwnd, text: &str, x: i32, y: i32, width: i32, height: i32) -> Hwnd {
-    label_with_id(hwnd, IDC_STATIC_ID, text, x, y, width, height)
+    refill_mouse_button_combo(hwnd, Language::English);
+    refill_speed_combo(hwnd, ID_MOUSE_SPEED, Language::English);
+    refill_speed_combo(hwnd, ID_KEY_SPEED, Language::English);
 }
 
 unsafe fn label_with_id(
@@ -635,7 +790,15 @@ unsafe fn label_with_id(
     )
 }
 
-unsafe fn textbox(hwnd: Hwnd, id: i32, text: &str, x: i32, y: i32, width: i32, height: i32) -> Hwnd {
+unsafe fn textbox(
+    hwnd: Hwnd,
+    id: i32,
+    text: &str,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> Hwnd {
     control(
         hwnd,
         "EDIT",
@@ -709,6 +872,56 @@ unsafe fn read_u64(hwnd: Hwnd, id: i32, label: &str) -> Result<u64, String> {
         .map_err(|_| format!("{label} must be a whole number"))
 }
 
+unsafe fn read_interval_from_controls(
+    hwnd: Hwnd,
+    speed_id: i32,
+    custom_ms_id: i32,
+    label: &str,
+) -> Result<u64, String> {
+    let custom = read_text(hwnd, custom_ms_id);
+    if !custom.trim().is_empty() {
+        return read_u64(hwnd, custom_ms_id, label);
+    }
+
+    let selected = SendMessageW(GetDlgItem(hwnd, speed_id), CB_GETCURSEL, 0, 0);
+    let index = if selected < 0 { 3 } else { selected as usize };
+    let preset = SpeedPreset::ALL
+        .get(index)
+        .copied()
+        .unwrap_or(SpeedPreset::TenPerSecond);
+    Ok(preset.interval_ms())
+}
+
+unsafe fn set_text(hwnd: Hwnd, id: i32, text: &str) {
+    SetWindowTextW(GetDlgItem(hwnd, id), wide(text).as_ptr());
+}
+
+unsafe fn refill_mouse_button_combo(hwnd: Hwnd, language: Language) {
+    let combo = GetDlgItem(hwnd, ID_MOUSE_BUTTON);
+    let selected = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+    SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+    for item in language.mouse_button_items() {
+        SendMessageW(combo, CB_ADDSTRING, 0, wide(item).as_ptr() as Lparam);
+    }
+    let next_selected = if selected < 0 { 0 } else { selected as Wparam };
+    SendMessageW(combo, CB_SETCURSEL, next_selected, 0);
+}
+
+unsafe fn refill_speed_combo(hwnd: Hwnd, id: i32, language: Language) {
+    let combo = GetDlgItem(hwnd, id);
+    let selected = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+    SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+    for preset in SpeedPreset::ALL {
+        let label = match language {
+            Language::English => preset.label_en(),
+            Language::Chinese => preset.label_zh(),
+        };
+        SendMessageW(combo, CB_ADDSTRING, 0, wide(label).as_ptr() as Lparam);
+    }
+    let next_selected = if selected < 0 { 3 } else { selected as Wparam };
+    SendMessageW(combo, CB_SETCURSEL, next_selected, 0);
+}
+
 fn click_mouse(button: MouseButton) {
     let (down, up) = match button {
         MouseButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
@@ -726,6 +939,132 @@ fn press_key(key: VirtualKey) {
     unsafe {
         send_key_event(key, 0);
         send_key_event(key, KEYEVENTF_KEYUP);
+    }
+}
+
+fn is_key_physically_down(key: VirtualKey) -> bool {
+    unsafe { (GetAsyncKeyState(key.0 as i32) & 0x8000u16 as i16) != 0 }
+}
+
+fn is_mouse_button_physically_down(button: MouseButton) -> bool {
+    let key = match button {
+        MouseButton::Left => VK_LBUTTON,
+        MouseButton::Right => VK_RBUTTON,
+        MouseButton::Middle => VK_MBUTTON,
+    };
+
+    is_key_physically_down(VirtualKey(key))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Language {
+    English,
+    Chinese,
+}
+
+impl Language {
+    fn language_label(self) -> &'static str {
+        match self {
+            Language::English => "Language",
+            Language::Chinese => "语言",
+        }
+    }
+
+    fn mouse_button_label(self) -> &'static str {
+        match self {
+            Language::English => "Mouse button",
+            Language::Chinese => "鼠标按键",
+        }
+    }
+
+    fn mouse_speed_label(self) -> &'static str {
+        match self {
+            Language::English => "Mouse speed",
+            Language::Chinese => "鼠标速度",
+        }
+    }
+
+    fn custom_ms_label(self) -> &'static str {
+        match self {
+            Language::English => "Custom interval ms",
+            Language::Chinese => "自定义间隔 ms",
+        }
+    }
+
+    fn keyboard_key_label(self) -> &'static str {
+        match self {
+            Language::English => "Keyboard key",
+            Language::Chinese => "键盘按键",
+        }
+    }
+
+    fn keyboard_speed_label(self) -> &'static str {
+        match self {
+            Language::English => "Keyboard speed",
+            Language::Chinese => "键盘速度",
+        }
+    }
+
+    fn arm_mouse(self) -> &'static str {
+        match self {
+            Language::English => "Arm Mouse (F6)",
+            Language::Chinese => "武装鼠标 (F6)",
+        }
+    }
+
+    fn disarm_mouse(self) -> &'static str {
+        match self {
+            Language::English => "Disarm Mouse (F6)",
+            Language::Chinese => "解除鼠标 (F6)",
+        }
+    }
+
+    fn arm_keyboard(self) -> &'static str {
+        match self {
+            Language::English => "Arm Keyboard (F7)",
+            Language::Chinese => "武装键盘 (F7)",
+        }
+    }
+
+    fn disarm_keyboard(self) -> &'static str {
+        match self {
+            Language::English => "Disarm Keyboard (F7)",
+            Language::Chinese => "解除键盘 (F7)",
+        }
+    }
+
+    fn stop_all(self) -> &'static str {
+        match self {
+            Language::English => "Stop All (F8)",
+            Language::Chinese => "全部停止 (F8)",
+        }
+    }
+
+    fn armed_label(self, armed: bool) -> &'static str {
+        match (self, armed) {
+            (Language::English, true) => "ARMED",
+            (Language::English, false) => "OFF",
+            (Language::Chinese, true) => "已武装",
+            (Language::Chinese, false) => "关闭",
+        }
+    }
+
+    fn status_text(self, mouse: &str, keyboard: &str) -> String {
+        match self {
+            Language::English => {
+                format!("Mouse: {mouse} (F6)    Keyboard: {keyboard} (F7)    Stop all: F8")
+            }
+            Language::Chinese => {
+                format!("鼠标: {mouse} (F6)    键盘: {keyboard} (F7)    全停: F8")
+            }
+        }
+    }
+
+    fn mouse_button_items(self) -> [&'static str; 3] {
+        match self {
+            Language::English => ["Left", "Right", "Middle"],
+            Language::Chinese => ["左键", "右键", "中键"],
+        }
     }
 }
 

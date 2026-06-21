@@ -7,26 +7,26 @@ fn starts_with_both_clickers_stopped() {
 
     let snapshot = runtime.snapshot();
 
-    assert!(!snapshot.mouse_running);
-    assert!(!snapshot.keyboard_running);
+    assert!(!snapshot.mouse_armed);
+    assert!(!snapshot.keyboard_armed);
     assert_eq!(snapshot.config.mouse_button, MouseButton::Left);
 }
 
 #[test]
-fn toggles_mouse_and_keyboard_independently() {
+fn toggles_mouse_and_keyboard_armed_independently() {
     let mut runtime = ClickerRuntime::new(sample_config());
 
     assert!(runtime.toggle_mouse());
-    assert!(runtime.snapshot().mouse_running);
-    assert!(!runtime.snapshot().keyboard_running);
+    assert!(runtime.snapshot().mouse_armed);
+    assert!(!runtime.snapshot().keyboard_armed);
 
     assert!(runtime.toggle_keyboard());
-    assert!(runtime.snapshot().mouse_running);
-    assert!(runtime.snapshot().keyboard_running);
+    assert!(runtime.snapshot().mouse_armed);
+    assert!(runtime.snapshot().keyboard_armed);
 
     assert!(!runtime.toggle_mouse());
-    assert!(!runtime.snapshot().mouse_running);
-    assert!(runtime.snapshot().keyboard_running);
+    assert!(!runtime.snapshot().mouse_armed);
+    assert!(runtime.snapshot().keyboard_armed);
 }
 
 #[test]
@@ -38,8 +38,8 @@ fn stop_all_turns_off_both_clickers() {
     runtime.stop_all();
 
     let snapshot = runtime.snapshot();
-    assert!(!snapshot.mouse_running);
-    assert!(!snapshot.keyboard_running);
+    assert!(!snapshot.mouse_armed);
+    assert!(!snapshot.keyboard_armed);
 }
 
 #[test]
@@ -51,8 +51,8 @@ fn updating_config_preserves_running_state() {
     runtime.set_config(next);
 
     let snapshot = runtime.snapshot();
-    assert!(snapshot.mouse_running);
-    assert!(!snapshot.keyboard_running);
+    assert!(snapshot.mouse_armed);
+    assert!(!snapshot.keyboard_armed);
     assert_eq!(snapshot.config.mouse_button, MouseButton::Right);
     assert_eq!(snapshot.config.keyboard_key, VirtualKey(0x20));
 }

@@ -7,12 +7,18 @@ use windows_clicker::config::{
 fn interval_below_minimum_is_rejected() {
     let err = validate_interval_ms(MIN_INTERVAL_MS - 1).unwrap_err();
 
-    assert_eq!(err, format!("interval must be at least {MIN_INTERVAL_MS} ms"));
+    assert_eq!(
+        err,
+        format!("interval must be at least {MIN_INTERVAL_MS} ms")
+    );
 }
 
 #[test]
 fn interval_at_minimum_is_valid() {
-    assert_eq!(validate_interval_ms(MIN_INTERVAL_MS).unwrap(), MIN_INTERVAL_MS);
+    assert_eq!(
+        validate_interval_ms(MIN_INTERVAL_MS).unwrap(),
+        MIN_INTERVAL_MS
+    );
 }
 
 #[test]
@@ -28,8 +34,14 @@ fn parses_letters_digits_and_named_keys() {
 
 #[test]
 fn rejects_empty_or_unknown_key_names() {
-    assert_eq!(parse_virtual_key("").unwrap_err(), "keyboard key is required");
-    assert_eq!(parse_virtual_key("not-a-key").unwrap_err(), "unsupported keyboard key: not-a-key");
+    assert_eq!(
+        parse_virtual_key("").unwrap_err(),
+        "keyboard key is required"
+    );
+    assert_eq!(
+        parse_virtual_key("not-a-key").unwrap_err(),
+        "unsupported keyboard key: not-a-key"
+    );
 }
 
 #[test]
@@ -46,7 +58,10 @@ fn config_constructor_validates_intervals_and_keys() {
 fn config_constructor_rejects_bad_values() {
     let err = ClickerConfig::new(MouseButton::Right, 1, "q", 75).unwrap_err();
 
-    assert_eq!(err, format!("mouse interval must be at least {MIN_INTERVAL_MS} ms"));
+    assert_eq!(
+        err,
+        format!("mouse interval must be at least {MIN_INTERVAL_MS} ms")
+    );
 
     let err = ClickerConfig::new(MouseButton::Middle, 50, "", 75).unwrap_err();
 

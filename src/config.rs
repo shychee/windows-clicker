@@ -1,4 +1,5 @@
 pub const MIN_INTERVAL_MS: u64 = 25;
+pub const MAX_CLICKS_PER_SECOND: u64 = 40;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseButton {
@@ -16,6 +17,60 @@ pub struct ClickerConfig {
     pub mouse_interval_ms: u64,
     pub keyboard_key: VirtualKey,
     pub keyboard_interval_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeedPreset {
+    OnePerSecond,
+    TwoPerSecond,
+    FivePerSecond,
+    TenPerSecond,
+    TwentyPerSecond,
+}
+
+impl SpeedPreset {
+    pub const ALL: [SpeedPreset; 5] = [
+        SpeedPreset::OnePerSecond,
+        SpeedPreset::TwoPerSecond,
+        SpeedPreset::FivePerSecond,
+        SpeedPreset::TenPerSecond,
+        SpeedPreset::TwentyPerSecond,
+    ];
+
+    pub fn clicks_per_second(self) -> u64 {
+        match self {
+            SpeedPreset::OnePerSecond => 1,
+            SpeedPreset::TwoPerSecond => 2,
+            SpeedPreset::FivePerSecond => 5,
+            SpeedPreset::TenPerSecond => 10,
+            SpeedPreset::TwentyPerSecond => 20,
+        }
+    }
+
+    pub fn interval_ms(self) -> u64 {
+        interval_from_clicks_per_second(self.clicks_per_second())
+            .expect("speed presets stay within supported range")
+    }
+
+    pub fn label_en(self) -> &'static str {
+        match self {
+            SpeedPreset::OnePerSecond => "1 / sec",
+            SpeedPreset::TwoPerSecond => "2 / sec",
+            SpeedPreset::FivePerSecond => "5 / sec",
+            SpeedPreset::TenPerSecond => "10 / sec",
+            SpeedPreset::TwentyPerSecond => "20 / sec",
+        }
+    }
+
+    pub fn label_zh(self) -> &'static str {
+        match self {
+            SpeedPreset::OnePerSecond => "每秒 1 次",
+            SpeedPreset::TwoPerSecond => "每秒 2 次",
+            SpeedPreset::FivePerSecond => "每秒 5 次",
+            SpeedPreset::TenPerSecond => "每秒 10 次",
+            SpeedPreset::TwentyPerSecond => "每秒 20 次",
+        }
+    }
 }
 
 impl ClickerConfig {
@@ -41,6 +96,16 @@ impl ClickerConfig {
 
 pub fn validate_interval_ms(interval_ms: u64) -> Result<u64, String> {
     validate_named_interval_ms("interval", interval_ms)
+}
+
+pub fn interval_from_clicks_per_second(clicks_per_second: u64) -> Result<u64, String> {
+    if !(1..=MAX_CLICKS_PER_SECOND).contains(&clicks_per_second) {
+        return Err(format!(
+            "clicks per second must be between 1 and {MAX_CLICKS_PER_SECOND}"
+        ));
+    }
+
+    validate_interval_ms(1000 / clicks_per_second)
 }
 
 fn validate_named_interval_ms(name: &str, interval_ms: u64) -> Result<u64, String> {
