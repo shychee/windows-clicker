@@ -1,6 +1,6 @@
 use windows_clicker::config::{
-    parse_virtual_key, validate_interval_ms, ClickerConfig, MouseButton, VirtualKey,
-    MIN_INTERVAL_MS,
+    parse_virtual_key, validate_interval_ms, virtual_key_display_name, ClickerConfig, MouseButton,
+    VirtualKey, MIN_INTERVAL_MS,
 };
 
 #[test]
@@ -30,6 +30,16 @@ fn parses_letters_digits_and_named_keys() {
     assert_eq!(parse_virtual_key("Enter").unwrap(), VirtualKey(0x0D));
     assert_eq!(parse_virtual_key("f12").unwrap(), VirtualKey(0x7B));
     assert_eq!(parse_virtual_key("left").unwrap(), VirtualKey(0x25));
+}
+
+#[test]
+fn formats_virtual_keys_for_capture_display() {
+    assert_eq!(virtual_key_display_name(VirtualKey(0x4A)), Some("J"));
+    assert_eq!(virtual_key_display_name(VirtualKey(0x37)), Some("7"));
+    assert_eq!(virtual_key_display_name(VirtualKey(0x20)), Some("Space"));
+    assert_eq!(virtual_key_display_name(VirtualKey(0x10)), Some("Shift"));
+    assert_eq!(virtual_key_display_name(VirtualKey(0x70)), Some("F1"));
+    assert_eq!(virtual_key_display_name(VirtualKey(0xFF)), None);
 }
 
 #[test]

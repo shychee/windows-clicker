@@ -2,8 +2,8 @@ use windows_clicker::config::VirtualKey;
 use windows_clicker::input::{
     clicker_hotkey_from_keyboard_event, hold_repeat_key_events, is_physical_keyboard_hook_event,
     is_physical_mouse_hook_event, keyboard_release_events, keyboard_scancode_from_virtual_key,
-    tap_key_events, ClickerHotkey, KeyEventKind, LOW_LEVEL_KEYBOARD_INJECTED_FLAG,
-    LOW_LEVEL_MOUSE_INJECTED_FLAG,
+    should_pause_repeat_for_key, tap_key_events, ClickerHotkey, KeyEventKind,
+    KEYBOARD_OTHER_KEY_PAUSE_MS, LOW_LEVEL_KEYBOARD_INJECTED_FLAG, LOW_LEVEL_MOUSE_INJECTED_FLAG,
 };
 
 #[test]
@@ -79,4 +79,20 @@ fn maps_common_virtual_keys_to_keyboard_scancodes() {
         Some(0x3B)
     );
     assert_eq!(keyboard_scancode_from_virtual_key(VirtualKey(0xFF)), None);
+}
+
+#[test]
+fn any_non_target_regular_key_pauses_keyboard_repeat() {
+    let target = VirtualKey(0x4A);
+
+    assert!(!should_pause_repeat_for_key(target, target));
+    assert!(!should_pause_repeat_for_key(target, VirtualKey(0x75)));
+    assert!(should_pause_repeat_for_key(target, VirtualKey(0x57)));
+    assert!(should_pause_repeat_for_key(target, VirtualKey(0x4F)));
+    assert!(should_pause_repeat_for_key(target, VirtualKey(0x20)));
+}
+
+#[test]
+fn other_key_pause_window_is_short_but_visible_to_games() {
+    assert_eq!(KEYBOARD_OTHER_KEY_PAUSE_MS, 45);
 }

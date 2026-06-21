@@ -15,6 +15,7 @@ pub enum ClickerHotkey {
 
 pub const LOW_LEVEL_KEYBOARD_INJECTED_FLAG: u32 = 0x10;
 pub const LOW_LEVEL_MOUSE_INJECTED_FLAG: u32 = 0x01;
+pub const KEYBOARD_OTHER_KEY_PAUSE_MS: u64 = 45;
 
 pub fn hold_repeat_key_events() -> [KeyEventKind; 2] {
     [KeyEventKind::Up, KeyEventKind::Down]
@@ -26,6 +27,10 @@ pub fn tap_key_events() -> [KeyEventKind; 2] {
 
 pub fn keyboard_release_events() -> [KeyEventKind; 1] {
     [KeyEventKind::Up]
+}
+
+pub fn should_pause_repeat_for_key(target: VirtualKey, pressed: VirtualKey) -> bool {
+    pressed != target && !is_clicker_hotkey(pressed)
 }
 
 pub fn is_physical_keyboard_hook_event(flags: u32) -> bool {
@@ -120,4 +125,8 @@ pub fn keyboard_scancode_from_virtual_key(key: VirtualKey) -> Option<u16> {
     };
 
     Some(scancode)
+}
+
+fn is_clicker_hotkey(key: VirtualKey) -> bool {
+    matches!(key.0, 0x75..=0x77)
 }

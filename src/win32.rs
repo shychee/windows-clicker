@@ -10,13 +10,15 @@ use std::sync::{
     Arc, Mutex, OnceLock,
 };
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use windows_clicker::config::{ClickerConfig, MouseButton, SpeedPreset, VirtualKey};
+use windows_clicker::config::{
+    virtual_key_display_name, ClickerConfig, MouseButton, SpeedPreset, VirtualKey,
+};
 use windows_clicker::input::{
     clicker_hotkey_from_keyboard_event, hold_repeat_key_events, is_physical_keyboard_hook_event,
     is_physical_mouse_hook_event, keyboard_release_events, keyboard_scancode_from_virtual_key,
-    ClickerHotkey, KeyEventKind,
+    should_pause_repeat_for_key, ClickerHotkey, KeyEventKind, KEYBOARD_OTHER_KEY_PAUSE_MS,
 };
 use windows_clicker::runtime::ClickerRuntime;
 
@@ -229,6 +231,7 @@ const ID_KEY_INPUT_LABEL: i32 = 1015;
 const ID_KEY_SPEED_LABEL: i32 = 1016;
 const ID_KEY_SPEED: i32 = 1017;
 const ID_KEY_CUSTOM_LABEL: i32 = 1018;
+const ID_KEY_CAPTURE: i32 = 1019;
 
 const HOTKEY_MOUSE: i32 = 2001;
 const HOTKEY_KEYBOARD: i32 = 2002;
@@ -259,6 +262,7 @@ const SW_SHOW: i32 = 5;
 const WH_KEYBOARD_LL: i32 = 13;
 const WH_MOUSE_LL: i32 = 14;
 const WM_COMMAND: Uint = 0x0111;
+const WM_APP_CAPTURE_KEY: Uint = 0x8001;
 const WM_CREATE: Uint = 0x0001;
 const WM_DESTROY: Uint = 0x0002;
 const WM_HOTKEY: Uint = 0x0312;
@@ -294,6 +298,7 @@ const WS_TABSTOP: Dword = 0x00010000;
 const WS_VISIBLE: Dword = 0x10000000;
 
 static APP_HWND: OnceLock<Hwnd> = OnceLock::new();
+static KEY_CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub fn run() -> Result<(), String> {
     unsafe {
@@ -374,6 +379,8 @@ static INPUT_STATE: OnceLock<Arc<PhysicalInputState>> = OnceLock::new();
 #[derive(Debug)]
 struct PhysicalInputState {
     keys: Mutex<[bool; 256]>,
+    current_repeat_key: Mutex<Option<VirtualKey>>,
+    keyboard_pause_until: Mutex<Option<Instant>>,
     mouse: Mutex<PhysicalMouseButtons>,
 }
 
@@ -388,12 +395,16 @@ impl PhysicalInputState {
     fn new() -> Self {
         Self {
             keys: Mutex::new([false; 256]),
+            current_repeat_key: Mutex::new(None),
+            keyboard_pause_until: Mutex::new(None),
             mouse: Mutex::new(PhysicalMouseButtons::default()),
         }
     }
 
     fn clear(&self) {
         *self.keys.lock().unwrap() = [false; 256];
+        *self.current_repeat_key.lock().unwrap() = None;
+        *self.keyboard_pause_until.lock().unwrap() = None;
         *self.mouse.lock().unwrap() = PhysicalMouseButtons::default();
     }
 
@@ -414,6 +425,30 @@ impl PhysicalInputState {
             .get(key.0 as usize)
             .copied()
             .unwrap_or(false)
+    }
+
+    fn request_keyboard_pause(&self, duration: Duration) {
+        *self.keyboard_pause_until.lock().unwrap() = Some(Instant::now() + duration);
+    }
+
+    fn set_current_repeat_key(&self, key: Option<VirtualKey>) {
+        *self.current_repeat_key.lock().unwrap() = key;
+    }
+
+    fn current_repeat_key(&self) -> Option<VirtualKey> {
+        *self.current_repeat_key.lock().unwrap()
+    }
+
+    fn is_keyboard_pause_active(&self) -> bool {
+        let mut pause_until = self.keyboard_pause_until.lock().unwrap();
+        match *pause_until {
+            Some(deadline) if Instant::now() < deadline => true,
+            Some(_) => {
+                *pause_until = None;
+                false
+            }
+            None => false,
+        }
     }
 
     fn set_mouse_button(&self, button: MouseButton, down: bool) {
@@ -440,6 +475,7 @@ struct AppState {
     language: Language,
     runtime: Arc<Mutex<ClickerRuntime>>,
     input_state: Arc<PhysicalInputState>,
+    capture_keyboard_key: bool,
     keyboard_hook: Hhook,
     mouse_hook: Hhook,
     mouse_stop: Option<Arc<AtomicBool>>,
@@ -460,6 +496,7 @@ impl AppState {
             language: Language::English,
             runtime: Arc::new(Mutex::new(ClickerRuntime::new(config))),
             input_state,
+            capture_keyboard_key: false,
             keyboard_hook: 0,
             mouse_hook: 0,
             mouse_stop: None,
@@ -524,6 +561,7 @@ impl AppState {
             ID_MOUSE_TOGGLE => self.toggle_mouse_from_ui(),
             ID_KEY_TOGGLE => self.toggle_keyboard_from_ui(),
             ID_STOP_ALL => self.stop_all(),
+            ID_KEY_CAPTURE => self.start_keyboard_capture(),
             ID_LANGUAGE if notification_code == CBN_SELCHANGE => {
                 self.language = self.read_language();
                 self.apply_language();
@@ -533,6 +571,33 @@ impl AppState {
             }
             _ => {}
         }
+    }
+
+    unsafe fn start_keyboard_capture(&mut self) {
+        self.capture_keyboard_key = true;
+        KEY_CAPTURE_ACTIVE.store(true, Ordering::Relaxed);
+        set_text(self.hwnd, ID_KEY_CAPTURE, self.language.capturing_key());
+    }
+
+    unsafe fn finish_keyboard_capture(&mut self, vk_code: Dword) {
+        if !self.capture_keyboard_key {
+            return;
+        }
+
+        self.capture_keyboard_key = false;
+        KEY_CAPTURE_ACTIVE.store(false, Ordering::Relaxed);
+        if let Some(name) = virtual_key_display_name(VirtualKey(vk_code as u16)) {
+            set_text(self.hwnd, ID_KEY_INPUT, name);
+        }
+        set_text(
+            self.hwnd,
+            ID_KEY_CAPTURE,
+            if self.capture_keyboard_key {
+                self.language.capturing_key()
+            } else {
+                self.language.capture_key()
+            },
+        );
     }
 
     unsafe fn toggle_mouse_from_ui(&mut self) {
@@ -599,7 +664,16 @@ impl AppState {
             let mut synthetic_key_down: Option<VirtualKey> = None;
             while !stop_for_thread.load(Ordering::Relaxed) {
                 let snapshot = runtime.lock().unwrap().snapshot();
+                input_state.set_current_repeat_key(Some(snapshot.config.keyboard_key));
                 if input_state.is_key_down(snapshot.config.keyboard_key) {
+                    if input_state.is_keyboard_pause_active() {
+                        if let Some(previous_key) = synthetic_key_down.take() {
+                            release_repeated_key(previous_key);
+                        }
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+
                     if synthetic_key_down != Some(snapshot.config.keyboard_key) {
                         if let Some(previous_key) = synthetic_key_down {
                             release_repeated_key(previous_key);
@@ -607,7 +681,12 @@ impl AppState {
                     }
                     repeat_held_key(snapshot.config.keyboard_key);
                     synthetic_key_down = Some(snapshot.config.keyboard_key);
-                    thread::sleep(Duration::from_millis(snapshot.config.keyboard_interval_ms));
+                    sleep_keyboard_interval(
+                        &stop_for_thread,
+                        &input_state,
+                        snapshot.config.keyboard_key,
+                        snapshot.config.keyboard_interval_ms,
+                    );
                 } else {
                     if let Some(previous_key) = synthetic_key_down.take() {
                         release_repeated_key(previous_key);
@@ -618,6 +697,7 @@ impl AppState {
             if let Some(previous_key) = synthetic_key_down {
                 release_repeated_key(previous_key);
             }
+            input_state.set_current_repeat_key(None);
         }));
         self.keyboard_stop = Some(stop);
     }
@@ -705,6 +785,7 @@ impl AppState {
             ID_KEY_CUSTOM_LABEL,
             self.language.custom_ms_label(),
         );
+        set_text(self.hwnd, ID_KEY_CAPTURE, self.language.capture_key());
         set_text(self.hwnd, ID_STOP_ALL, self.language.stop_all());
         refill_mouse_button_combo(self.hwnd, self.language);
         refill_speed_combo(self.hwnd, ID_MOUSE_SPEED, self.language);
@@ -766,10 +847,14 @@ unsafe extern "system" fn keyboard_hook_proc(
                 match wparam as Uint {
                     WM_KEYDOWN | WM_SYSKEYDOWN => {
                         let was_down = input_state.set_key(event.vk_code, true);
-                        if let Some(hotkey) =
-                            clicker_hotkey_from_keyboard_event(event.vk_code, true, was_down)
-                        {
-                            post_clicker_hotkey(hotkey);
+                        request_keyboard_pause_for_other_key(input_state, event.vk_code);
+                        post_captured_keyboard_key(event.vk_code);
+                        if !KEY_CAPTURE_ACTIVE.load(Ordering::Relaxed) {
+                            if let Some(hotkey) =
+                                clicker_hotkey_from_keyboard_event(event.vk_code, true, was_down)
+                            {
+                                post_clicker_hotkey(hotkey);
+                            }
                         }
                     }
                     WM_KEYUP | WM_SYSKEYUP => {
@@ -796,6 +881,14 @@ unsafe fn post_clicker_hotkey(hotkey: ClickerHotkey) {
     };
 
     PostMessageW(hwnd, WM_HOTKEY, id as Wparam, 0);
+}
+
+unsafe fn post_captured_keyboard_key(vk_code: Dword) {
+    let Some(hwnd) = APP_HWND.get().copied() else {
+        return;
+    };
+
+    PostMessageW(hwnd, WM_APP_CAPTURE_KEY, vk_code as Wparam, 0);
 }
 
 unsafe extern "system" fn mouse_hook_proc(n_code: i32, wparam: Wparam, lparam: Lparam) -> Lresult {
@@ -855,6 +948,12 @@ unsafe extern "system" fn window_proc(
                     HOTKEY_STOP => (*app).stop_all(),
                     _ => {}
                 }
+            }
+            0
+        }
+        WM_APP_CAPTURE_KEY => {
+            if !app.is_null() {
+                (*app).finish_keyboard_capture(wparam as Dword);
             }
             0
         }
@@ -941,6 +1040,7 @@ unsafe fn create_controls(hwnd: Hwnd) {
 
     label_with_id(hwnd, ID_KEY_INPUT_LABEL, "Keyboard key", 20, 134, 130, 24);
     textbox(hwnd, ID_KEY_INPUT, "Space", 160, 132, 90, 24);
+    button(hwnd, ID_KEY_CAPTURE, "Capture", 260, 132, 90, 24);
 
     label_with_id(hwnd, ID_KEY_SPEED_LABEL, "Keyboard speed", 20, 172, 130, 24);
     control(
@@ -982,6 +1082,7 @@ unsafe fn create_controls(hwnd: Hwnd) {
         ID_MOUSE_INTERVAL,
         ID_KEY_INPUT_LABEL,
         ID_KEY_INPUT,
+        ID_KEY_CAPTURE,
         ID_KEY_SPEED_LABEL,
         ID_KEY_SPEED,
         ID_KEY_CUSTOM_LABEL,
@@ -1171,6 +1272,37 @@ fn repeat_held_key(key: VirtualKey) {
     }
 }
 
+fn sleep_keyboard_interval(
+    stop: &AtomicBool,
+    input_state: &PhysicalInputState,
+    key: VirtualKey,
+    interval_ms: u64,
+) {
+    let mut remaining_ms = interval_ms;
+    while remaining_ms > 0 {
+        if stop.load(Ordering::Relaxed)
+            || !input_state.is_key_down(key)
+            || input_state.is_keyboard_pause_active()
+        {
+            return;
+        }
+
+        let slice_ms = remaining_ms.min(5);
+        thread::sleep(Duration::from_millis(slice_ms));
+        remaining_ms -= slice_ms;
+    }
+}
+
+fn request_keyboard_pause_for_other_key(input_state: &PhysicalInputState, vk_code: Dword) {
+    let repeat_key = input_state.current_repeat_key();
+    if let Some(target) = repeat_key {
+        let pressed = VirtualKey(vk_code as u16);
+        if should_pause_repeat_for_key(target, pressed) {
+            input_state.request_keyboard_pause(Duration::from_millis(KEYBOARD_OTHER_KEY_PAUSE_MS));
+        }
+    }
+}
+
 fn release_repeated_key(key: VirtualKey) {
     for event in keyboard_release_events() {
         send_key_event_kind(key, event);
@@ -1232,6 +1364,20 @@ impl Language {
         match self {
             Language::English => "Keyboard key",
             Language::Chinese => "键盘按键",
+        }
+    }
+
+    fn capture_key(self) -> &'static str {
+        match self {
+            Language::English => "Capture",
+            Language::Chinese => "捕获",
+        }
+    }
+
+    fn capturing_key(self) -> &'static str {
+        match self {
+            Language::English => "Press key...",
+            Language::Chinese => "按键...",
         }
     }
 
